@@ -1,59 +1,71 @@
-# DJI M3M Winter Barley Analysis Experiment
+# DJI M3M Winter Barley Multispectral Analysis
 
-基于 DJI Mavic 3 Multispectral（M3M）冬季大麦数据集的多光谱影像分析实验项目。
+基于 DJI Mavic 3 Multispectral（M3M）冬季大麦航拍数据开展的多光谱影像处理与空间分析项目。目前完成了数据审查、近似辐射校正、正射影像质量检查、植被指数分析及相对代理指标对照实验。项目仍处于阶段性研究，不能视为已完成生物量或产量预测。
 
-## 项目目标
+## 已完成工作
 
-项目计划完成以下流程：
+### 第 1 周：数据审查与项目准备
 
-1. 多光谱影像辐射校正、拼接和正射校正；
-2. 作物空间分布与长势可视化；
-3. 植被指数计算与长势统计分析；
-4. 基于生物量的产量预测；
-5. 结合地形、土壤等环境特征分析作物胁迫；
-6. 生成变量施药分区与处方，并评估成本效益；
-7. 使用 Streamlit 实现影像、指数、长势分区和施药处方的交互展示。
+- 盘点航拍数据，识别出 309 组多光谱拍摄记录，共 1,236 张波段影像。
+- 确认多光谱波段为 Green、Red、Red Edge 和 NIR；没有独立 Blue 波段。
+- 检查研究区边界及影像元数据，建立处理代码结构。
 
-## 当前进度：
+### 第 2 周：辐射校正、正射重建与质量检查
 
-已完成：
+- `audit_dataset.py`：检查数据组完整性及波段文件。
+- `src/m3m/radiometric.py`、`main.py`：读取 DJI XMP 参数，按暗角、黑电平、曝光/增益、波段增益及 DLS 辐照度进行信号校正，并以 NIR 反射率板估算共用反射率尺度。
+- `scripts/prepare_odm_inputs.py`、`scripts/orthorectify_wsl.sh`：准备 ODM 工作副本并调用 WSL/OpenDroneMap 完成正射重建流程。少量 NoData 填补仅作用于工作副本。
+- 输出四个光谱波段及 Alpha 透明度波段的 GeoTIFF 正射影像；当前成果约为 5 cm 像元、EPSG:32633。
+- 检查修复前后影像的有效值、覆盖范围及共同网格差异，并生成质量统计文件。
 
-- 阅读任务书、数据集报告并完成项目需求梳理；
-- 完成需求说明书、技术调研报告和数据探索报告；
-- 检查数据集结构，确认包含 309 组 RGB 与多光谱影像；
-- 确认多光谱波段为 Green、Red、Red Edge、NIR，未提供独立 Blue 波段；
-- 使用 QGIS 成功加载 `boundary.kml`，并导出为 `boundary.gpkg`；
-- 配置 Python 3.12 虚拟环境；
-- 安装并验证 Rasterio、GeoPandas、NumPy、Pandas、Scikit-learn、Streamlit 等依赖；
-- 搭建模块化项目目录；
-- 成功读取研究区边界数据；
-- 成功读取单张 NIR 与 Red 原始影像，并输出尺寸、数据类型、像素值范围和元数据；
-- 初始化 Git 仓库并上传基础代码架构。
+### 第 3 周：植被指数与相对分区
 
-## 当前代码
+- 使用修复后的正射影像计算 NDVI、NDRE 和 EVI2，并统计有效像元数、均值、标准差、中位数、P95 及范围。
+- 按田块内分位数生成五级相对分区、面积统计表及分布图。
+- 当前三个指数的统计使用共同有效掩膜，共 43,080,137 个像元。
 
-当前程序可以：
+### 第 4 周：相对代理指标对照实验
 
-- 读取 GeoPackage 格式的研究区边界；
-- 在原始数据目录中定位 NIR 或 Red 波段影像；
-- 读取单波段 TIFF 影像；
-- 输出影像的尺寸、数据类型、最小值、最大值和元数据。
+- 将各指数转换为田块内百分位秩，比较四种等权方案：NDVI+NDRE、NDVI+EVI2、EVI2+NDRE，以及 NDVI+NDRE+EVI2。
+- 输出连续代理分数栅格、五分位等级栅格、统计表和对照图。
+- 使用 Spearman 相关、五分位同级比例及低/高等级 Jaccard 指数比较方案；基于共同有效区域的 43,080,137 个像元进行统计。
+- 这些指标描述方案之间的空间一致性，不表示对生物量或产量的预测精度。
 
-## 项目结构
+## 主要代码
 
-```text
-M3M_Project/
-├── app/
-│   └── streamlit_app.py
-├── src/
-│   └── m3m/
-│       ├── config.py
-│       ├── io.py
-│       ├── preprocess.py
-│       ├── indices.py
-│       ├── analysis.py
-│       ├── modeling.py
-│       └── prescription.py
-├── tests/
-├── main.py
-└── .gitignore
+| 文件 | 用途 |
+| --- | --- |
+| `audit_dataset.py` | 航拍数据和波段文件审查 |
+| `main.py`、`src/m3m/radiometric.py` | 近似辐射校正 |
+| `src/m3m/io.py` | 读取栅格、边界及 DJI XMP 元数据 |
+| `scripts/prepare_odm_inputs.py` | 准备 ODM 工作副本并记录填补审计信息 |
+| `scripts/orthorectify_wsl.sh`、`src/m3m/orthorectification.py` | 启动 WSL/OpenDroneMap 正射处理 |
+| `scripts/assess_orthomosaic.py`、`scripts/compare_repair_results.py` | 正射影像质量检查及修复前后比较 |
+| `scripts/calculate_vegetation_indices.py` | 计算 NDVI、NDRE、EVI2 及统计量 |
+| `scripts/map_vegetation_indices.py` | 生成指数五分位分类栅格、面积表和分布图 |
+| `scripts/compare_vegetation_indices.py` | 比较指数间相关性和等级一致性 |
+| `scripts/compare_proxy_indicators.py` | 生成并比较四种相对代理指标方案 |
+
+## 数据与本地结果
+
+原始数据和边界文件位于项目外部的数据目录；处理结果、栅格和报告保存在本机 `outputs/` 下。`.gitignore` 排除了 `data/`、`outputs/` 以及大型影像文件，因此 GitHub 仓库主要保存代码，不包含原始数据、完整正射影像或报告附件。
+
+克隆项目后，需要先检查 `src/m3m/config.py` 和各脚本中的本机绝对路径，并准备 Python 地理空间依赖及 WSL/OpenDroneMap 环境。当前仓库未提供 `requirements.txt`，依赖版本尚未固定。全量辐射处理可运行 `python main.py`；试跑部分航拍组可运行 `python main.py --limit 2`。指数及代理指标脚本需要通过命令行参数提供影像、边界和输出目录，具体参数可用 `--help` 查看。
+
+## 方法限制与未完成事项
+
+1. **反射率是近似结果。** 当前流程以 NIR 白板估算共用尺度；白板 ROI 和饱和阈值仍需验证，且没有对每个波段完成独立地面反射率校准。因此不应将输出描述为经全面地面验证的绝对反射率。
+2. **Green 波段存在饱和问题。** Green 白板 ROI 饱和，无法可靠估计 Green 波段独立不确定度；因此 GNDVI 不纳入当前正式指数统计与代理指标实验。`outputs/indices/` 中可能留有早期试算文件，应以当前统计表和报告纳入的 NDVI、NDRE、EVI2 为准。
+3. **指数误差传播仍受输入数据限制。** 各波段独立不确定度及波段间协方差没有全部可靠获得；因此已有估算不能替代完整、独立验证的指数不确定度评估，尤其不能为 GNDVI 给出可靠传播结果。
+4. **缺少田间实测真值。** 目前没有与影像像元或分区配对的实测生物量、LAI 或产量样本；无法训练并验证监督模型，也不能报告有意义的预测 R²、RMSE 或 MAE。代理分数仅表示同一田块、同一影像日期内的相对植被差异。
+5. **代理分区不是农学阈值。** 指数秩等权是透明的经验方案，不是由样本拟合的权重；五分位等级是田内相对等级，不能直接解释为固定长势等级、施肥量或产量等级。
+6. **几何精度验证有限。** ODM 重建和影像间网格比较不等于独立绝对定位精度验证；目前没有独立测量的地面控制点用于全面评估绝对平面误差。
+7. **时相与环境变量有限。** 当前分析针对现有航拍时相，不能据此推断完整生育期变化；尚未完成地形、土壤等环境因子分析。
+8. **后续任务尚未实现。** 生物量/产量建模、胁迫因子分析、变量处方与成本效益评估，以及交互式 Streamlit 展示仍属计划工作。
+
+## 后续工作方向
+
+- 获取并整理可与影像空间配对的田间生物量、LAI 或产量样本。
+- 在具备可靠波段不确定度及协方差数据后，开展完整的植被指数误差传播。
+- 获取独立控制点或参考数据，补充绝对定位精度验证。
+- 在有足够验证数据后，再评估生物量/产量模型及处方分区的有效性。
