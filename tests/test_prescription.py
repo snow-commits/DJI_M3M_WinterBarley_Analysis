@@ -142,7 +142,8 @@ def test_every_zone_gets_one_row_and_areas_sum_to_the_field(
         assert row["area_percent"] == pytest.approx(20.0, abs=1.0)
 
 
-def test_target_mean_rate_is_reached_exactly(tmp_path: Path, class_raster: Path) -> None:
+def test_target_mean_rate_is_essentially_reached(tmp_path: Path, class_raster: Path) -> None:
+    """The rounded schedule must still land on the requested field average."""
     result = build(
         class_raster,
         output_dir=tmp_path / "rx",
@@ -151,12 +152,45 @@ def test_target_mean_rate_is_reached_exactly(tmp_path: Path, class_raster: Path)
         target_mean_rate=100.0,
         make_figure=False,
     )
-    assert result.totals["mean_rate"] == pytest.approx(100.0, rel=1e-9)
-    # The area-weighted mean is what the raster must actually contain.
+    assert result.totals["mean_rate"] == pytest.approx(100.0, rel=1e-3)
+    # The area-weighted mean is what the raster must actually contain, measured
+    # from the written pixels rather than from the schedule.
     with rasterio.open(result.rate_raster) as src:
         rates = src.read(1)
     valid = rates != NODATA_RATE
-    assert float(rates[valid].mean()) == pytest.approx(100.0, rel=1e-6)
+    assert float(rates[valid].mean()) == pytest.approx(100.0, rel=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (239.9958, 240.0),  # the real output of a 120 kg/ha target
+        (179.99685, 180.0),
+        (119.9979, 120.0),
+        (59.99895, 60.0),
+        (0.00399993, 0.004),  # tiny unit magnitudes must survive rounding
+        (0.0, 0.0),
+        (-12.34567, -12.35),
+    ],
+)
+def test_round_to_significant_keeps_four_figures(value: float, expected: float) -> None:
+    assert prescription.round_to_significant(value) == pytest.approx(expected)
+
+
+def test_rescaled_rates_are_controller_usable(tmp_path: Path, class_raster: Path) -> None:
+    """A realistic 120 kg N/ha target must not yield numbers like 239.996."""
+    result = build(
+        class_raster,
+        output_dir=tmp_path / "rx",
+        prefix="rx",
+        schedule=RateSchedule({1: 0.0, 2: 40.0, 3: 80.0, 4: 120.0, 5: 160.0}, unit="kg N/ha"),
+        target_mean_rate=120.0,
+        make_figure=False,
+    )
+    for rate in result.totals["rate_schedule"].values():
+        # Every rate is its own 4-significant-figure rounding.
+        assert prescription.round_to_significant(rate) == pytest.approx(rate)
+    assert result.totals["rate_schedule"]["5"] == pytest.approx(240.0, abs=0.01)
 
 
 def test_rescaling_keeps_the_shape_of_the_schedule(tmp_path: Path, class_raster: Path) -> None:

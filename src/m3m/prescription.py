@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,14 @@ SUMMARY_FIELDS: tuple[str, ...] = (
 
 NODATA_RATE = -9999.0
 
+#: Significant digits kept when rescaling to a target mean. The rescaled schedule
+#: is a controller setpoint, not an intermediate result: "239.996 kg/ha" is not a
+#: rate anyone can enter into a sprayer, "240" is. Four significant digits round
+#: 239.9958 to 240 and 0.0039998 to 0.004, so the rule stays harmless across very
+#: different unit magnitudes. The mean the rounding actually achieves is reported
+#: next to the target, so the shift is never hidden.
+RESCALED_RATE_SIGNIFICANT_DIGITS = 4
+
 ZONE_COLORS = ("#a50026", "#f46d43", "#fee08b", "#a6d96a", "#1a9850")
 
 #: Suffixes that turn a per-hectare rate into an absolute quantity.
@@ -82,8 +91,19 @@ __all__ = [
     "build",
     "create_figure",
     "quantity_unit",
+    "round_to_significant",
     "validate_schedule",
 ]
+
+
+def round_to_significant(
+    value: float, digits: int = RESCALED_RATE_SIGNIFICANT_DIGITS
+) -> float:
+    """Round to *digits* significant figures, keeping zero at zero."""
+    if value == 0 or not math.isfinite(value):
+        return float(value)
+    magnitude = math.floor(math.log10(abs(value)))
+    return round(value, max(0, digits - 1 - magnitude))
 
 
 def quantity_unit(unit: str) -> str:
@@ -391,8 +411,19 @@ def build(
                 "zero area-weighted mean. Give the zones non-zero relative weights."
             )
         schedule = schedule.rescaled(target_mean_rate / current_mean)
+        # Round to controller-usable numbers; the achieved mean is measured below
+        # from the rounded schedule and reported against the target.
+        schedule = RateSchedule(
+            rates={
+                code: round_to_significant(rate) for code, rate in schedule.rates.items()
+            },
+            unit=schedule.unit,
+        )
         if max(schedule.rates.values()) <= 0:
-            raise PrescriptionError("Rescaling produced a non-positive schedule.")
+            raise PrescriptionError(
+                "Rescaling produced a non-positive schedule. The target mean rate may be "
+                "too small for the requested unit."
+            )
 
     schedule_text = "; ".join(
         f"{code}={schedule.rates[code]:g}" for code in sorted(schedule.rates)
