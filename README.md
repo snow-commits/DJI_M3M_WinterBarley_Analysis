@@ -1,71 +1,318 @@
-# DJI M3M Winter Barley Multispectral Analysis
+# m3m — DJI Mavic 3 Multispectral processing toolkit
 
-基于 DJI Mavic 3 Multispectral（M3M）冬季大麦航拍数据开展的多光谱影像处理与空间分析项目。目前完成了数据审查、近似辐射校正、正射影像质量检查、植被指数分析及相对代理指标对照实验。项目仍处于阶段性研究，不能视为已完成生物量或产量预测。
+[![CI](https://github.com/snow-commits/DJI_M3M_WinterBarley_Analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/snow-commits/DJI_M3M_WinterBarley_Analysis/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-## 已完成工作
+A label-free processing toolkit for **DJI Mavic 3 Multispectral (M3M)** imagery:
+radiometric calibration, orthomosaic quality assessment, vegetation indices,
+within-field relative zones, and a sensitivity analysis of the zoning itself.
 
-### 第 1 周：数据审查与项目准备
+Everything here is `pip install`-able, needs **no external binaries** (no
+ExifTool, no GDAL CLI, no Docker) for the core pipeline, and never loads a whole
+orthomosaic into memory — indices and quantiles are computed window by window
+into fixed-range histograms.
 
-- 盘点航拍数据，识别出 309 组多光谱拍摄记录，共 1,236 张波段影像。
-- 确认多光谱波段为 Green、Red、Red Edge 和 NIR；没有独立 Blue 波段。
-- 检查研究区边界及影像元数据，建立处理代码结构。
+> **What this is not.** Nothing in this toolkit predicts biomass or yield, and
+> nothing here has been validated against field-measured ground truth. The
+> default pipeline ends at *relative* within-field zoning. See
+> [Methodology and limitations](#methodology-and-limitations) before quoting any
+> number it produces.
 
-### 第 2 周：辐射校正、正射重建与质量检查
+---
 
-- `audit_dataset.py`：检查数据组完整性及波段文件。
-- `src/m3m/radiometric.py`、`main.py`：读取 DJI XMP 参数，按暗角、黑电平、曝光/增益、波段增益及 DLS 辐照度进行信号校正，并以 NIR 反射率板估算共用反射率尺度。
-- `scripts/prepare_odm_inputs.py`、`scripts/orthorectify_wsl.sh`：准备 ODM 工作副本并调用 WSL/OpenDroneMap 完成正射重建流程。少量 NoData 填补仅作用于工作副本。
-- 输出四个光谱波段及 Alpha 透明度波段的 GeoTIFF 正射影像；当前成果约为 5 cm 像元、EPSG:32633。
-- 检查修复前后影像的有效值、覆盖范围及共同网格差异，并生成质量统计文件。
+## Install
 
-### 第 3 周：植被指数与相对分区
+```bash
+git clone https://github.com/snow-commits/DJI_M3M_WinterBarley_Analysis.git
+cd DJI_M3M_WinterBarley_Analysis
+python -m pip install -e .
+```
 
-- 使用修复后的正射影像计算 NDVI、NDRE 和 EVI2，并统计有效像元数、均值、标准差、中位数、P95 及范围。
-- 按田块内分位数生成五级相对分区、面积统计表及分布图。
-- 当前三个指数的统计使用共同有效掩膜，共 43,080,137 个像元。
+Requires Python 3.10+. Pulls in `numpy`, `rasterio`, `geopandas`, `shapely`,
+`matplotlib` and `scipy`.
 
-### 第 4 周：相对代理指标对照实验
+## Quick start — no flight data required
 
-- 将各指数转换为田块内百分位秩，比较四种等权方案：NDVI+NDRE、NDVI+EVI2、EVI2+NDRE，以及 NDVI+NDRE+EVI2。
-- 输出连续代理分数栅格、五分位等级栅格、统计表和对照图。
-- 使用 Spearman 相关、五分位同级比例及低/高等级 Jaccard 指数比较方案；基于共同有效区域的 43,080,137 个像元进行统计。
-- 这些指标描述方案之间的空间一致性，不表示对生物量或产量的预测精度。
+The repository ships a synthetic M3M dataset generator so you can run the entire
+pipeline offline, in about ten seconds:
 
-## 主要代码
+```bash
+m3m synthetic --dest demo
 
-| 文件 | 用途 |
+m3m audit       --config demo/m3m.toml
+m3m panel       --config demo/m3m.toml
+m3m calibrate   --config demo/m3m.toml
+m3m indices     --config demo/m3m.toml --raster demo/synthetic_reflectance_orthomosaic.tif
+m3m zones       --config demo/m3m.toml
+m3m compare     --config demo/m3m.toml
+m3m sensitivity --config demo/m3m.toml
+```
+
+The generated captures are written as the exact inverse of the DJI signal
+model, so `calibrate` must return the reflectance the generator asked for.
+That round trip is asserted in the test suite — it is the strongest guarantee
+available without proprietary flight data.
+
+## Quick start — your own data
+
+```bash
+m3m config init            # writes a commented m3m.toml template
+$EDITOR m3m.toml           # point [paths] at your captures
+m3m config show            # confirm what was resolved, and from where
+
+m3m audit                  # how many capture groups, which bands are missing
+m3m panel                  # panel ROI statistics, saturation, NIR anchor
+m3m calibrate              # raw DN -> reflectance GeoTIFFs
+m3m indices --raster <reflectance_orthomosaic.tif>
+m3m zones
+```
+
+`m3m panel` is not optional the first time. Panel ROIs depend on your capture
+geometry and cannot be guessed; the command tells you exactly which
+`[radiometric.panel_roi]` entry to fill in and can render an overlay PNG
+(`--show-roi`) so you can measure the panel position on your own images.
+
+## Commands
+
+| Command | What it does |
 | --- | --- |
-| `audit_dataset.py` | 航拍数据和波段文件审查 |
-| `main.py`、`src/m3m/radiometric.py` | 近似辐射校正 |
-| `src/m3m/io.py` | 读取栅格、边界及 DJI XMP 元数据 |
-| `scripts/prepare_odm_inputs.py` | 准备 ODM 工作副本并记录填补审计信息 |
-| `scripts/orthorectify_wsl.sh`、`src/m3m/orthorectification.py` | 启动 WSL/OpenDroneMap 正射处理 |
-| `scripts/assess_orthomosaic.py`、`scripts/compare_repair_results.py` | 正射影像质量检查及修复前后比较 |
-| `scripts/calculate_vegetation_indices.py` | 计算 NDVI、NDRE、EVI2 及统计量 |
-| `scripts/map_vegetation_indices.py` | 生成指数五分位分类栅格、面积表和分布图 |
-| `scripts/compare_vegetation_indices.py` | 比较指数间相关性和等级一致性 |
-| `scripts/compare_proxy_indicators.py` | 生成并比较四种相对代理指标方案 |
+| `m3m config show` / `config init` | Inspect the resolved configuration, or write a starter `m3m.toml` |
+| `m3m audit` | Inventory capture groups; flag missing bands, size and dtype mismatches |
+| `m3m panel` | Panel ROI statistics, saturation fraction, NIR anchor, cross-band consistency |
+| `m3m calibrate` | Apply the DJI vignetting/black-level/gain/exposure/irradiance chain and anchor to the panel |
+| `m3m orthorectify` | Render (and optionally run) an OpenDroneMap script for the four-band reflectance set |
+| `m3m fill-nodata` | Fill saturation placeholders in the throw-away ODM working copy |
+| `m3m assess` | Check an orthomosaic for physically impossible values and boundary coverage |
+| `m3m indices` | NDVI / NDRE / EVI2 rasters with memory-bounded statistics |
+| `m3m zones` | Within-field relative quintiles, area table, maps |
+| `m3m compare` | Index pairwise agreement, or a repaired orthomosaic against the original |
+| `m3m sensitivity` | How much the zoning depends on the chosen index weights |
+| `m3m synthetic` | Generate a synthetic dataset |
 
-## 数据与本地结果
+Run `m3m <command> --help` for the full flag list.
 
-原始数据和边界文件位于项目外部的数据目录；处理结果、栅格和报告保存在本机 `outputs/` 下。`.gitignore` 排除了 `data/`、`outputs/` 以及大型影像文件，因此 GitHub 仓库主要保存代码，不包含原始数据、完整正射影像或报告附件。
+## Configuration
 
-克隆项目后，需要先检查 `src/m3m/config.py` 和各脚本中的本机绝对路径，并准备 Python 地理空间依赖及 WSL/OpenDroneMap 环境。当前仓库未提供 `requirements.txt`，依赖版本尚未固定。全量辐射处理可运行 `python main.py`；试跑部分航拍组可运行 `python main.py --limit 2`。指数及代理指标脚本需要通过命令行参数提供影像、边界和输出目录，具体参数可用 `--help` 查看。
+Resolution order, lowest to highest priority:
 
-## 方法限制与未完成事项
+1. built-in defaults
+2. a TOML file — `--config`, `$M3M_CONFIG`, or `./m3m.toml` searched upwards
+3. `M3M_*` environment variables
+4. explicit command-line flags
 
-1. **反射率是近似结果。** 当前流程以 NIR 白板估算共用尺度；白板 ROI 和饱和阈值仍需验证，且没有对每个波段完成独立地面反射率校准。因此不应将输出描述为经全面地面验证的绝对反射率。
-2. **Green 波段存在饱和问题。** Green 白板 ROI 饱和，无法可靠估计 Green 波段独立不确定度；因此 GNDVI 不纳入当前正式指数统计与代理指标实验。`outputs/indices/` 中可能留有早期试算文件，应以当前统计表和报告纳入的 NDVI、NDRE、EVI2 为准。
-3. **指数误差传播仍受输入数据限制。** 各波段独立不确定度及波段间协方差没有全部可靠获得；因此已有估算不能替代完整、独立验证的指数不确定度评估，尤其不能为 GNDVI 给出可靠传播结果。
-4. **缺少田间实测真值。** 目前没有与影像像元或分区配对的实测生物量、LAI 或产量样本；无法训练并验证监督模型，也不能报告有意义的预测 R²、RMSE 或 MAE。代理分数仅表示同一田块、同一影像日期内的相对植被差异。
-5. **代理分区不是农学阈值。** 指数秩等权是透明的经验方案，不是由样本拟合的权重；五分位等级是田内相对等级，不能直接解释为固定长势等级、施肥量或产量等级。
-6. **几何精度验证有限。** ODM 重建和影像间网格比较不等于独立绝对定位精度验证；目前没有独立测量的地面控制点用于全面评估绝对平面误差。
-7. **时相与环境变量有限。** 当前分析针对现有航拍时相，不能据此推断完整生育期变化；尚未完成地形、土壤等环境因子分析。
-8. **后续任务尚未实现。** 生物量/产量建模、胁迫因子分析、变量处方与成本效益评估，以及交互式 Streamlit 展示仍属计划工作。
+```toml
+[paths]
+img_dir     = "data/Dataset"
+panel_dir   = "data/Reflectance_Panel"
+boundary    = "data/boundary.gpkg"
+out_dir     = "outputs"
 
-## 后续工作方向
+[radiometric]
+saturation_dn = 65520
 
-- 获取并整理可与影像空间配对的田间生物量、LAI 或产量样本。
-- 在具备可靠波段不确定度及协方差数据后，开展完整的植被指数误差传播。
-- 获取独立控制点或参考数据，补充绝对定位精度验证。
-- 在有足够验证数据后，再评估生物量/产量模型及处方分区的有效性。
+[radiometric.panel_reflectance]      # from your panel's certificate
+G = 0.493
+R = 0.494
+RE = 0.494
+NIR = 0.493
+
+[radiometric.panel_roi]              # [x_min, y_min, x_max, y_max] in panel-capture pixels
+NIR = [926, 1160, 1144, 1390]
+
+[output]
+prefix = "field"                     # -> field_ndvi.tif
+```
+
+Relative paths inside the TOML file resolve against that file's own directory.
+`m3m.toml` is git-ignored on purpose. See [`m3m.example.toml`](m3m.example.toml)
+for the fully commented version.
+
+When a required path is missing, the error names the flag, the environment
+variable and the TOML key that would supply it — the code contains no
+machine-specific fallback paths.
+
+## Input data
+
+Raw captures must be named `<name>_<NNNN>_MS_<BAND>.TIF` with `BAND` one of
+`G`, `R`, `RE`, `NIR`, accompanied by the true-colour frame `<name>_<NNNN>_D.JPG`.
+Each capture must carry DJI's XMP block; `m3m audit` reports any group that is
+incomplete, and calibration refuses to run on a group with missing bands rather
+than silently emitting partial results.
+
+The reflectance orthomosaic consumed by `m3m indices` must have five bands with
+descriptions `Red`, `Green`, `NIR`, `RedEdge`, `Alpha` in that order. Band
+positions are validated against the descriptions, so a mislabelled export fails
+loudly instead of producing plausible-looking nonsense.
+
+Note that the M3M has **no independent blue band**. Blue-dependent indices such
+as the standard three-band EVI cannot be computed; this toolkit uses EVI2 for
+that reason.
+
+## Outputs
+
+```
+outputs/
+├─ dataset_inventory.csv              m3m audit
+├─ radiometric/                       m3m calibrate
+│  ├─ *_REFLECTANCE_APPROX.tif
+│  └─ radiometric_manifest.csv        per-image status, saturation, min/median/mean/max
+├─ indices/                           m3m indices, zones, compare
+│  ├─ field_ndvi.tif, field_ndre.tif, field_evi2.tif
+│  ├─ field_ndvi_relative_5class.tif  ...
+│  ├─ vegetation_index_summary.csv
+│  ├─ vegetation_index_relative_classes.csv
+│  └─ *.png
+├─ sensitivity/                       m3m sensitivity
+├─ orthomosaic/                       m3m orthorectify, assess, compare
+└─ orthorectify.sh                    rendered, review before running
+```
+
+## Methodology and limitations
+
+These are the constraints on what the outputs mean. They are stated here rather
+than buried, because most of them cannot be checked from the imagery alone.
+
+1. **Reflectance is provisional.** The chain follows DJI's documented per-image
+   model (vignetting polynomial, black level, gain/exposure, per-band gain
+   adjustment, DLS irradiance) and then applies a single scene scale anchored on
+   the NIR panel. Per-band absolute reflectance is **not** independently
+   ground-calibrated, and the panel ROI and saturation threshold still deserve
+   verification on your own data. Do not describe the output as fully validated
+   absolute reflectance.
+
+2. **The green band saturates on some flights.** On the reference dataset the
+   green panel ROI saturated, so no reliable independent uncertainty could be
+   estimated for it and GNDVI was excluded from the formal statistics. Check
+   `m3m panel` output before trusting any green-band product.
+
+3. **Index uncertainty is not propagated.** Per-band uncertainties and
+   inter-band covariances are unavailable, so the reported statistics are not a
+   substitute for a proper uncertainty budget.
+
+4. **There is no ground truth.** Without field-measured biomass, LAI or yield
+   paired to pixels, no supervised model can be trained or validated and no
+   meaningful predictive R², RMSE or MAE can be reported. The toolkit therefore
+   reports none, and the zoning it produces is relative to one field on one
+   date.
+
+5. **Relative classes are not agronomic thresholds.** The five classes are
+   equal-frequency quantiles within the analysed field. "Highest relative" means
+   greener than 80% of *this* field *today* — not "high yield" and not a
+   fertiliser prescription.
+
+6. **`m3m sensitivity` measures weight sensitivity, not accuracy.** It re-weights
+   the same index ranks and reports how similar the resulting maps are. Two
+   candidate scores agreeing does not make either closer to biomass: with no
+   ground truth in the comparison there is nothing for the agreement to be
+   measured against. It is a self-referential robustness check, and the module
+   docstring says so.
+
+7. **Geometric accuracy is not verified.** Orthorectification quality checks
+   compare grids and coverage; they are not an independent assessment of
+   absolute positional error, which needs surveyed ground control points.
+
+8. **Temporal and environmental coverage is narrow.** Results describe the
+   captured dates only and do not carry over to the whole growing season.
+
+### What would lift these limits
+
+- Field-measured biomass / LAI / yield samples paired to pixels — turns the
+  relative ranking into a validated regression.
+- Independent ground control points — turns grid comparison into a positional
+  accuracy statement.
+- Per-band uncertainty and covariance estimates — enables a real error
+  propagation through the indices.
+
+## Development
+
+```bash
+python -m pip install -e ".[dev]"
+pytest              # full suite: no network, no proprietary data
+ruff check src tests
+```
+
+The test suite generates its own synthetic data, so it runs identically on a
+laptop and in CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml), Ubuntu
+and Windows × Python 3.10/3.12).
+
+## Migrating from the pre-0.2 scripts
+
+The original one-off scripts are now library modules behind a single CLI. Their
+logic is unchanged; only paths, configuration and packaging moved.
+
+| Before | Now |
+| --- | --- |
+| `python audit_dataset.py` | `m3m audit` |
+| `python main.py [--limit N]` | `m3m calibrate [--limit N]` |
+| `python -m src.m3m.radiometric` | `m3m panel` |
+| `scripts/calculate_vegetation_indices.py` | `m3m indices` |
+| `scripts/map_vegetation_indices.py` | `m3m zones` |
+| `scripts/compare_vegetation_indices.py` | `m3m compare` |
+| `scripts/compare_proxy_indicators.py` | `m3m sensitivity` |
+| `scripts/compare_repair_results.py` | `m3m compare --before A --after B` |
+| `scripts/assess_orthomosaic.py` | `m3m assess` |
+| `scripts/prepare_odm_inputs.py` | `m3m fill-nodata` |
+| `scripts/orthorectify_wsl.sh` | `m3m orthorectify` (rendered from config) |
+
+Output filenames lost their dataset-specific literal. Pass
+`--prefix winterbarley` (or set `[output] prefix`) to reproduce the old names.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+## 中文说明
+
+### 这个项目是什么
+
+一个面向 **DJI Mavic 3 Multispectral（M3M）** 多光谱影像的处理工具包：辐射校正、正射影像质检、
+植被指数、田内相对分区，以及分区对权重选择的敏感性分析。
+
+核心流程 `pip install` 即可运行，**不需要 ExifTool、不需要 GDAL 命令行、不需要 Docker**；
+指数与分位数统计全部按窗口流式计算，几千万像元也不会把内存吃满。
+
+### 三分钟跑通（不需要任何飞行数据）
+
+```bash
+m3m synthetic --dest demo                    # 生成一套合成数据集
+m3m calibrate  --config demo/m3m.toml        # 辐射校正
+m3m indices    --config demo/m3m.toml --raster demo/synthetic_reflectance_orthomosaic.tif
+m3m zones      --config demo/m3m.toml
+```
+
+合成影像是按 DJI 信号模型的**精确逆运算**生成的，所以校正结果必须还原出生成时设定的反射率——
+这条往返断言写在测试里，是在没有真实飞行数据时能做的最强保证。
+
+### 用自己的数据
+
+```bash
+m3m config init     # 生成带注释的 m3m.toml
+# 编辑 [paths] 指向你的数据
+m3m panel           # 先跑这个！面板 ROI 必须按你自己的影像量取
+m3m calibrate
+m3m indices --raster <你的反射率正射影像.tif>
+m3m zones
+```
+
+配置优先级：默认值 < `m3m.toml` < `M3M_*` 环境变量 < 命令行参数。
+代码里**没有任何写死的本机路径**；缺少必需路径时，报错会明确告诉你该设哪个参数、哪个环境变量、哪个 TOML 键。
+
+### 必须知道的限制
+
+- **反射率是近似结果**：按 DJI 文档的逐影像模型（暗角、黑电平、增益/曝光、波段增益、DLS 辐照度）
+  处理后，以 NIR 反射率板锚定一个共用尺度；**没有做逐波段独立的地面反射率标定**。
+- **没有田间实测真值**：因此不训练、也不报告任何有监督预测指标（R²/RMSE/MAE）。
+  输出的分区是"同一田块、同一日期内的相对等级"，**不是农学阈值，也不是施肥处方**。
+- **`m3m sensitivity` 测的是权重敏感性，不是精度**：它把同一份指数秩重新加权后比较结果相似度，
+  没有真值参与，所以不能解读为"某个方案更接近生物量"。
+- **几何精度未验证**：缺少独立测量的地面控制点。
+- M3M **没有独立蓝波段**，因此无法计算标准三波段 EVI，本工具用 EVI2 替代。
+
+### 与旧脚本的对应关系
+
+原来的独立脚本已全部迁移为库模块并统一到一个 CLI，**算法逻辑未改动**，只是路径、配置和打包方式变了。
+详细的对照表见上方 "Migrating from the pre-0.2 scripts" 一节。
+输出文件名去掉了 `winterbarley` 这个数据集专有前缀，可用 `--prefix winterbarley` 还原。
