@@ -20,6 +20,14 @@ matters.
 > [Methodology and limitations](#methodology-and-limitations) before quoting any
 > number it produces.
 
+![The pipeline on the synthetic demo dataset: a false-colour reflectance
+orthomosaic, NDVI, equal-frequency relative zones, and a variable-rate
+prescription](docs/demo-pipeline.png)
+
+*Every panel is produced by this repository on its own synthetic demo dataset —
+run `m3m synthetic --dest demo` and see [Quick start](#quick-start--no-flight-data-required).
+The figure is reproducible with `python docs/render_gallery.py . build/gallery`.*
+
 ---
 
 ## Install
@@ -145,14 +153,16 @@ Each capture must carry DJI's XMP block; `m3m audit` reports any group that is
 incomplete, and calibration refuses to run on a group with missing bands rather
 than silently emitting partial results.
 
-The reflectance orthomosaic consumed by `m3m indices` must have five bands with
-descriptions `Red`, `Green`, `NIR`, `RedEdge`, `Alpha` in that order. Band
-positions are validated against the descriptions, so a mislabelled export fails
-loudly instead of producing plausible-looking nonsense.
+The reflectance orthomosaic consumed by `m3m indices` must expose `Red`, `NIR`
+and `RedEdge`. Their positions are **not** hard-coded: describe the layout under
+`[orthomosaic] band_map` (or `--band-map`) and any multispectral export works —
+see [Works with any sensor](#works-with-any-sensor). When the export carries band
+descriptions they are cross-checked against the map, so a contradiction fails
+loudly instead of producing a plausible-looking nonsense index map.
 
 Note that the M3M has **no independent blue band**. Blue-dependent indices such
-as the standard three-band EVI cannot be computed; this toolkit uses EVI2 for
-that reason.
+as the standard three-band EVI cannot be computed from M3M data; this toolkit
+uses EVI2 for that reason. Sensors that do have blue simply leave it unmapped.
 
 ## Outputs
 
@@ -177,6 +187,48 @@ outputs/
 ├─ orthomosaic/                       m3m orthorectify, assess, compare
 └─ orthorectify.sh                    rendered, review before running
 ```
+
+## Works with any sensor
+
+The radiometric front end is DJI-specific: it reads DJI's XMP block and applies
+DJI's per-image signal model. **Everything downstream of the orthomosaic is
+sensor-agnostic.** If you already have a reflectance orthomosaic from Pix4D,
+Metashape, OpenDroneMap or the vendor's own software, `indices`, `zones`,
+`compare`, `sensitivity`, `prescribe` and `assess` will run on it — you only have
+to say where the bands are.
+
+```toml
+[orthomosaic]
+# MicaSense RedEdge-MX writes Blue, Green, Red, RedEdge, NIR; no alpha band.
+[orthomosaic.band_map]
+blue    = 1
+green   = 2
+red     = 3
+rededge = 4
+nir     = 5
+alpha   = 0    # 0 means "this sensor has no such band"
+```
+
+The same thing from the command line, without editing any config:
+
+```bash
+m3m indices --raster micasense_ortho.tif --boundary field.gpkg \
+  --band-map blue=1,green=2,red=3,rededge=4,nir=5,alpha=0
+```
+
+Only `red`, `nir` and `rededge` are required. `green`, `blue` and `alpha` are
+optional, and dropping alpha simply drops the alpha clause from the validity mask.
+
+**Why the descriptions matter.** If the export sets band descriptions, they are
+cross-checked against the map and a contradiction is a hard error. That check has
+teeth because the failure mode is otherwise invisible: a map that swaps Red and
+NIR still produces a clean, plausible-looking NDVI raster — negated, with no sign
+that anything is wrong. If your export has no descriptions there is nothing to
+check against, and a wrong map will pass silently.
+
+Tested layout. The suite covers a MicaSense-ordered raster end to end
+(`tests/test_indices.py::test_micasense_style_layout_is_supported`), including the
+no-alpha case.
 
 ## Memory behaviour
 
