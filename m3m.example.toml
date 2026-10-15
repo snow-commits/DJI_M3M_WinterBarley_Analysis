@@ -1,0 +1,70 @@
+# Example configuration for the M3M toolkit.
+#
+# Copy this file to `m3m.toml` in the directory you run `m3m` from and edit the
+# paths. `m3m.toml` is git-ignored on purpose: it holds machine-specific paths
+# and must never be committed.
+#
+# Resolution order (lowest to highest priority):
+#   1. built-in defaults
+#   2. this TOML file
+#   3. M3M_* environment variables
+#   4. explicit command line flags
+#
+# So `m3m calibrate --img-dir /other/place` always wins over this file.
+# Relative paths inside this file are resolved against the file's own directory.
+
+[paths]
+# Directory holding the raw M3M captures. Files must be named
+# `<capture>_<NNNN>_MS_<BAND>.TIF` with BAND in {G, R, RE, NIR}.
+img_dir = "data/M3M_WinterBarley_Dataset/90m_RGBMSP_RTK_Overlap7080/Dataset"
+
+# Directory holding the reflectance-panel captures (same naming convention).
+panel_dir = "data/M3M_WinterBarley_Dataset/90m_RGBMSP_RTK_Overlap7080/Reflectance_Panel"
+
+# Field boundary used to mask every statistic. Any vector format geopandas can
+# read (GeoPackage, GeoJSON, shapefile) works.
+boundary = "data/M3M_WinterBarley_Dataset/boundary.gpkg"
+
+# Optional: directory holding manual image annotations.
+annotation_dir = "data/M3M_WinterBarley_Dataset/Image_Annotation"
+
+# Root directory for every generated artefact.
+out_dir = "outputs"
+
+[radiometric]
+# Digital number at or above which a pixel is treated as saturated and written
+# as NoData. 65520 is the value observed on M3M 16-bit captures; confirm it
+# against your own panel images with `m3m panel`.
+saturation_dn = 65520
+
+# Nominal reflectance of the panel per band, as printed on the panel's
+# calibration certificate. These values set the absolute scale of every
+# calibrated output - if they are wrong, all reflectances are wrong by the same
+# factor.
+[radiometric.panel_reflectance]
+G = 0.493
+R = 0.494
+RE = 0.494
+NIR = 0.493
+
+# Panel region of interest inside each panel capture, in *pixel* coordinates as
+# [x_min, y_min, x_max, y_max] with the origin at the top-left corner.
+#
+# These coordinates are specific to one capture geometry: re-derive them for
+# your own panel images (run `m3m panel --show-roi` to write an overlay PNG).
+[radiometric.panel_roi]
+G = [990, 1150, 1200, 1380]
+R = [948, 1150, 1166, 1378]
+RE = [938, 1185, 1158, 1410]
+NIR = [926, 1160, 1144, 1390]
+
+[orthorectification]
+# Optional: override the ODM dataset name and output prefix.
+dataset_name = "winterbarley"
+orthophoto_resolution_cm = 5
+
+[output]
+# Filename prefix for generated rasters, e.g. `field_ndvi.tif`. Keep it stable
+# across `indices`, `zones`, `compare` and `sensitivity` so the commands find
+# each other's outputs.
+prefix = "field"
