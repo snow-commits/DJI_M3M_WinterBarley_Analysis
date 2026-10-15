@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install the package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Run the test suite
+        run: pytest -q
+
+      - name: Smoke-test the CLI on a generated dataset
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m m3m --version
+          python -m m3m synthetic --dest demo
+          python -m m3m audit      --config demo/m3m.toml
+          python -m m3m panel      --config demo/m3m.toml
+          python -m m3m calibrate  --config demo/m3m.toml
+          python -m m3m indices    --config demo/m3m.toml \
+            --raster demo/synthetic_reflectance_orthomosaic.tif
+          python -m m3m zones      --config demo/m3m.toml
+          python -m m3m compare    --config demo/m3m.toml
+          python -m m3m sensitivity --config demo/m3m.toml

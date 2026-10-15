@@ -1,20 +1,36 @@
 # Python
 __pycache__/
 *.py[cod]
-.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+.eggs/
 
-# Virtual environment
+# Virtual environments
 .venv/
+venv/
+env/
 
-# PyCharm
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
 .idea/
+.vscode/
+*.swp
 
-# Local configuration
+# Local configuration - holds machine-specific paths, never commit it
+m3m.toml
+m3m.local.toml
 .env
 
 # Raw and generated data
 data/
 outputs/
+demo/
 
 # Large remote-sensing files
 *.tif
