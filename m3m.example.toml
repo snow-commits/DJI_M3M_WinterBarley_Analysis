@@ -65,6 +65,42 @@ orthophoto_resolution_cm = 5
 
 [output]
 # Filename prefix for generated rasters, e.g. `field_ndvi.tif`. Keep it stable
-# across `indices`, `zones`, `compare` and `sensitivity` so the commands find
-# each other's outputs.
+# across `indices`, `zones`, `compare`, `sensitivity` and `prescribe` so the
+# commands find each other's outputs.
 prefix = "field"
+
+[prescription]
+# ---------------------------------------------------------------------------
+# Everything in this table is an OPERATOR DECISION, not a model output.
+#
+# This toolkit has no ground-truth crop measurements, so it cannot know how much
+# product a zone needs. What it can do is apply a schedule you have decided on
+# consistently, then tell you the resulting areas, quantities and costs.
+# ---------------------------------------------------------------------------
+
+# Unit of the rates below. Use a real unit ("kg N/ha", "L/ha", "seeds/ha") to get
+# meaningful quantities and costs. "relative" keeps the numbers unitless.
+unit = "kg N/ha"
+
+# Application rate per within-field relative class
+# (1 = lowest vigour ... 5 = highest vigour).
+# In relative units, a schedule like 0/0.25/0.5/0.75/1.0 is a sensible starting
+# shape; in real units, put your own numbers here.
+[prescription.rate_by_class]
+1 = 0
+2 = 40
+3 = 80
+4 = 120
+5 = 160
+
+# Rescale the schedule so the area-weighted mean rate equals this value. This is
+# how you keep the TOTAL product under your control: the zones produced by
+# `m3m zones` are equal-frequency, so each one always covers about a fifth of the
+# field and the tool can never conclude that a field needs less overall.
+# Leave out (or set to 0) to use the schedule above exactly as written.
+target_mean_rate = 120
+
+# Optional cost model. Leave both at 0 to skip the money columns.
+product_price_per_unit = 4.5      # per unit of `unit` above (e.g. per kg N)
+application_cost_per_ha = 25.0    # machinery cost per hectare per pass
+currency = "CNY"

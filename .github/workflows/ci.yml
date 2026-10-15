@@ -53,3 +53,6 @@ jobs:
           python -m m3m zones      --config demo/m3m.toml
           python -m m3m compare    --config demo/m3m.toml
           python -m m3m sensitivity --config demo/m3m.toml
+          python -m m3m prescribe  --config demo/m3m.toml \
+            --rate 1=0,2=40,3=80,4=120,5=160 --unit "kg N/ha" \
+            --target-mean-rate 100 --product-price 4.5 --application-cost-per-ha 25

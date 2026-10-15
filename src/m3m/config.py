@@ -59,6 +59,12 @@ DEFAULT_ORTHOPHOTO_RESOLUTION_CM = 5
 #: dataset-specific literal that used to be baked into the analysis scripts.
 DEFAULT_OUTPUT_PREFIX = "field"
 
+#: Default prescription schedule. Deliberately **relative** rather than physical
+#: units, so that `m3m prescribe` produces a usable demo without inventing an
+#: agronomic recommendation the toolkit has no basis for.
+DEFAULT_PRESCRIPTION_RATES: dict[int, float] = {1: 0.0, 2: 0.25, 3: 0.5, 4: 0.75, 5: 1.0}
+DEFAULT_PRESCRIPTION_UNIT = "relative"
+
 _PATH_FIELDS: tuple[str, ...] = (
     "img_dir",
     "panel_dir",
@@ -193,6 +199,26 @@ class OutputSettings:
 
 
 @dataclass
+class PrescriptionSettings:
+    """Variable-rate application parameters.
+
+    ``rate_by_class`` is an **operator decision**, never a model output: with no
+    ground truth in the pipeline, the toolkit cannot know how much product a zone
+    needs. The default is a relative schedule so the command runs out of the box;
+    set real units and rates before using the numbers for anything.
+    """
+
+    rate_by_class: dict[int, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRESCRIPTION_RATES)
+    )
+    unit: str = DEFAULT_PRESCRIPTION_UNIT
+    target_mean_rate: float | None = None
+    product_price_per_unit: float = 0.0
+    currency: str = "CNY"
+    application_cost_per_ha: float = 0.0
+
+
+@dataclass
 class Settings:
     """Fully resolved configuration."""
 
@@ -202,6 +228,7 @@ class Settings:
         default_factory=OrthorectificationSettings
     )
     output: OutputSettings = field(default_factory=OutputSettings)
+    prescription: PrescriptionSettings = field(default_factory=PrescriptionSettings)
     config_file: Path | None = None
     #: Which source supplied each key, for ``m3m config show``.
     sources: dict[str, str] = field(default_factory=dict)
@@ -228,6 +255,17 @@ class Settings:
                 "orthophoto_resolution_cm": self.orthorectification.orthophoto_resolution_cm,
             },
             "output": {"prefix": self.output.prefix},
+            "prescription": {
+                "rate_by_class": {
+                    str(code): rate
+                    for code, rate in sorted(self.prescription.rate_by_class.items())
+                },
+                "unit": self.prescription.unit,
+                "target_mean_rate": self.prescription.target_mean_rate,
+                "product_price_per_unit": self.prescription.product_price_per_unit,
+                "currency": self.prescription.currency,
+                "application_cost_per_ha": self.prescription.application_cost_per_ha,
+            },
             "sources": dict(self.sources),
         }
 
@@ -462,8 +500,101 @@ def load_settings(
     settings.output.prefix = prefix
     settings.sources["output.prefix"] = prefix_source
 
+    # ---- prescription ---------------------------------------------------- #
+    raw_rx = raw.get("prescription", {})
+    if not isinstance(raw_rx, dict):
+        raise ConfigError("[prescription] must be a TOML table.")
+    rx_overrides = overrides.get("prescription") or {}
+    if not isinstance(rx_overrides, dict):
+        raise ConfigError("Internal error: prescription overrides must be a mapping.")
+
+    rates = dict(DEFAULT_PRESCRIPTION_RATES)
+    rates_source = "default"
+    if "rate_by_class" in raw_rx:
+        rates = _coerce_rate_table(raw_rx["rate_by_class"], where="[prescription.rate_by_class]")
+        rates_source = "config file"
+    if "rate_by_class" in rx_overrides:
+        rates.update(_coerce_rate_table(rx_overrides["rate_by_class"], where="--rate"))
+        rates_source = "command line"
+    settings.prescription.rate_by_class = rates
+    settings.sources["prescription.rate_by_class"] = rates_source
+
+    unit = str(raw_rx.get("unit", DEFAULT_PRESCRIPTION_UNIT))
+    unit_source = "config file" if "unit" in raw_rx else "default"
+    if env.get(f"{ENV_PREFIX}PRESCRIPTION_UNIT"):
+        unit = env[f"{ENV_PREFIX}PRESCRIPTION_UNIT"]
+        unit_source = "environment"
+    if "unit" in rx_overrides:
+        unit = str(rx_overrides["unit"])
+        unit_source = "command line"
+    if not unit.strip():
+        raise ConfigError("[prescription] unit must not be empty.")
+    settings.prescription.unit = unit
+    settings.sources["prescription.unit"] = unit_source
+
+    target = raw_rx.get("target_mean_rate")
+    target_source = "config file" if "target_mean_rate" in raw_rx else "default"
+    if env.get(f"{ENV_PREFIX}TARGET_MEAN_RATE"):
+        target = env[f"{ENV_PREFIX}TARGET_MEAN_RATE"]
+        target_source = "environment"
+    if "target_mean_rate" in rx_overrides:
+        target = rx_overrides["target_mean_rate"]
+        target_source = "command line"
+    if target in (None, "", 0, 0.0):
+        target_value: float | None = None
+    else:
+        target_value = float(target)
+        if target_value <= 0:
+            raise ConfigError(
+                f"[prescription] target_mean_rate must be positive when set, got {target_value}."
+            )
+    settings.prescription.target_mean_rate = target_value
+    settings.sources["prescription.target_mean_rate"] = target_source
+
+    price = float(raw_rx.get("product_price_per_unit", 0.0))
+    if "product_price_per_unit" in rx_overrides:
+        price = float(rx_overrides["product_price_per_unit"])
+    if price < 0:
+        raise ConfigError("[prescription] product_price_per_unit must not be negative.")
+    settings.prescription.product_price_per_unit = price
+
+    application_cost = float(raw_rx.get("application_cost_per_ha", 0.0))
+    if "application_cost_per_ha" in rx_overrides:
+        application_cost = float(rx_overrides["application_cost_per_ha"])
+    if application_cost < 0:
+        raise ConfigError("[prescription] application_cost_per_ha must not be negative.")
+    settings.prescription.application_cost_per_ha = application_cost
+
+    currency = str(raw_rx.get("currency", "CNY"))
+    if "currency" in rx_overrides:
+        currency = str(rx_overrides["currency"])
+    settings.prescription.currency = currency
+
     _validate_bands(settings)
     return settings
+
+
+def _coerce_rate_table(value: Any, *, where: str) -> dict[int, float]:
+    """Validate a class-code -> rate mapping coming from TOML or the CLI."""
+    if not isinstance(value, dict):
+        raise ConfigError(f"{where} must map class codes to rates, got {type(value).__name__}.")
+    rates: dict[int, float] = {}
+    for key, rate in value.items():
+        try:
+            code = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"{where} keys must be integer class codes, got {key!r}."
+            ) from exc
+        if code < 1:
+            raise ConfigError(f"{where} class codes start at 1, got {code}.")
+        try:
+            rates[code] = float(rate)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{where} rate for class {code} is not a number: {rate!r}") from exc
+    if not rates:
+        raise ConfigError(f"{where} must contain at least one class.")
+    return rates
 
 
 def _validate_bands(settings: Settings) -> None:

@@ -1,4 +1,4 @@
-﻿"""Command line interface: ``m3m <command>``.
+"""Command line interface: ``m3m <command>``.
 
 Every subcommand is a thin wrapper around one library function. Configuration is
 resolved once, from the command line, the ``M3M_*`` environment and ``m3m.toml``
@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_zones(subparsers)
     _add_compare(subparsers)
     _add_sensitivity(subparsers)
+    _add_prescribe(subparsers)
     _add_synthetic(subparsers)
     return parser
 
@@ -281,6 +282,64 @@ def _add_sensitivity(subparsers: Any) -> None:
     parser.set_defaults(handler=_handle_sensitivity)
 
 
+def _add_prescribe(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "prescribe",
+        help="Turn relative zones into a variable-rate prescription with areas and costs",
+        description=(
+            "Builds a variable-rate application map from the within-field relative zones.\n"
+            "The rate schedule is an operator decision, not a model output: this toolkit\n"
+            "has no ground truth and cannot know how much product a zone needs."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_common(parser)
+    parser.add_argument(
+        "--class-raster",
+        type=Path,
+        default=None,
+        help="Relative-class raster; default <out>/indices/<prefix>_<index>_relative_5class.tif",
+    )
+    parser.add_argument(
+        "--index",
+        default="ndvi",
+        help="Which index's zones to use when --class-raster is not given (default: ndvi)",
+    )
+    parser.add_argument("--index-dir", type=Path, default=None, help="Default: <out>/indices")
+    parser.add_argument("--boundary", type=Path, default=None, help="Only used to draw the figure")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Default: <out>/prescription")
+    parser.add_argument(
+        "--rate",
+        action="append",
+        default=None,
+        metavar="CLASS=RATE",
+        help=(
+            "Override the rate schedule, e.g. --rate 1=0,2=40,3=80,4=120,5=160 "
+            "(repeatable; later entries win)"
+        ),
+    )
+    parser.add_argument(
+        "--unit", default=None, help="Rate unit, e.g. kg/ha (default: from [prescription])"
+    )
+    parser.add_argument(
+        "--target-mean-rate",
+        type=float,
+        default=None,
+        help=(
+            "Rescale the schedule so the area-weighted mean rate equals this value. Keeps "
+            "the total product under operator control even though the zones are "
+            "equal-frequency."
+        ),
+    )
+    parser.add_argument("--product-price", type=float, default=None, help="Price per rate unit")
+    parser.add_argument(
+        "--application-cost-per-ha", type=float, default=None, help="Machine cost per hectare"
+    )
+    parser.add_argument("--currency", default=None, help="Currency label for the cost table")
+    parser.add_argument("--no-figure", action="store_true", help="Skip the PNG map")
+    parser.set_defaults(handler=_handle_prescribe)
+
+
 def _add_synthetic(subparsers: Any) -> None:
     parser = subparsers.add_parser(
         "synthetic", help="Generate a small synthetic dataset so you can run everything offline"
@@ -333,7 +392,49 @@ def _resolve(args: argparse.Namespace) -> Settings:
     roi_overrides = _parse_roi_overrides(getattr(args, "roi_band", None))
     if roi_overrides:
         overrides["panel_roi"] = roi_overrides
+    prescription_overrides = _parse_prescription_overrides(args)
+    if prescription_overrides:
+        overrides["prescription"] = prescription_overrides
     return load_settings(getattr(args, "config", None), overrides)
+
+
+def _parse_rate_table(values: Sequence[str] | None) -> dict[int, float]:
+    """Parse ``--rate 1=0,2=40`` (and repeated ``--rate`` flags) into a mapping."""
+    if not values:
+        return {}
+    rates: dict[int, float] = {}
+    for chunk in values:
+        for item in chunk.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" not in item:
+                raise ConfigError(f"--rate expects CLASS=RATE, got {item!r}")
+            code, _, rate = item.partition("=")
+            try:
+                rates[int(code.strip())] = float(rate.strip())
+            except ValueError as exc:
+                raise ConfigError(f"--rate {item!r} is not CLASS=RATE with numbers") from exc
+    return rates
+
+
+def _parse_prescription_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect the prescription flags, ignoring the ones that were not given."""
+    result: dict[str, Any] = {}
+    rates = _parse_rate_table(getattr(args, "rate", None))
+    if rates:
+        result["rate_by_class"] = rates
+    for attribute, setting in (
+        ("unit", "unit"),
+        ("target_mean_rate", "target_mean_rate"),
+        ("product_price", "product_price_per_unit"),
+        ("application_cost_per_ha", "application_cost_per_ha"),
+        ("currency", "currency"),
+    ):
+        value = getattr(args, attribute, None)
+        if value is not None:
+            result[setting] = value
+    return result
 
 
 def _parse_roi_overrides(values: Sequence[str] | None) -> dict[str, tuple[int, int, int, int]]:
@@ -692,6 +793,55 @@ def _handle_sensitivity(args: argparse.Namespace) -> int:
             f"rho={row['spearman_rho_histogram_midranks']:.4f}, "
             f"same quintile={row['same_quintile_percent']:.2f}%"
         )
+    return EXIT_OK
+
+
+def _handle_prescribe(args: argparse.Namespace) -> int:
+    from m3m import prescription
+    from m3m.constants import INDEX_ORDER
+    from m3m.zones import class_raster_path
+
+    settings = _resolve(args)
+    index_name = str(args.index).lower()
+    if index_name not in INDEX_ORDER:
+        raise ConfigError(
+            f"--index must be one of {', '.join(INDEX_ORDER)}, got {args.index!r}"
+        )
+
+    index_dir = args.index_dir or (settings.paths.out_dir / "indices")
+    class_raster = args.class_raster or class_raster_path(
+        index_dir, settings.output.prefix, index_name
+    )
+    class_raster = _require_file(class_raster, "--class-raster")
+
+    # The boundary is only needed to draw the figure, so its absence is not an error.
+    boundary = args.boundary or settings.paths.boundary
+    if boundary is not None and not Path(boundary).is_file():
+        boundary = None
+
+    rx = settings.prescription
+    result = prescription.build(
+        class_raster,
+        output_dir=args.output_dir or (settings.paths.out_dir / "prescription"),
+        prefix=settings.output.prefix,
+        index_name=index_name,
+        schedule=prescription.RateSchedule(rates=rx.rate_by_class, unit=rx.unit),
+        target_mean_rate=rx.target_mean_rate,
+        pricing=prescription.Pricing(
+            product_price_per_unit=rx.product_price_per_unit,
+            currency=rx.currency,
+            application_cost_per_ha=rx.application_cost_per_ha,
+        ),
+        boundary=boundary,
+        make_figure=not args.no_figure,
+    )
+    print(result.format_report())
+    print()
+    print(f"Rate raster : {result.rate_raster}")
+    print(f"Summary CSV : {result.summary_csv}")
+    print(f"Totals JSON : {result.totals_json}")
+    if result.figure:
+        print(f"Figure      : {result.figure}")
     return EXIT_OK
 
 
