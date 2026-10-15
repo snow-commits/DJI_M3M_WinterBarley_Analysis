@@ -233,6 +233,17 @@ def _add_indices(subparsers: Any) -> None:
     parser.add_argument("--boundary", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None, help="Default: <out>/indices")
     parser.add_argument("--prefix", default=None, help="Output filename prefix")
+    parser.add_argument(
+        "--band-map",
+        action="append",
+        default=None,
+        metavar="BAND=POSITION",
+        help=(
+            "Where each band sits in the orthomosaic, 1-based, e.g. "
+            "--band-map red=3,nir=5,rededge=4,alpha=0 for a MicaSense RedEdge-MX "
+            "export. Use 0 for a band the sensor does not have."
+        ),
+    )
     parser.set_defaults(handler=_handle_indices)
 
 
@@ -396,6 +407,9 @@ def _resolve(args: argparse.Namespace) -> Settings:
     prescription_overrides = _parse_prescription_overrides(args)
     if prescription_overrides:
         overrides["prescription"] = prescription_overrides
+    band_map = _parse_band_map(getattr(args, "band_map", None))
+    if band_map:
+        overrides["band_map"] = band_map
     return load_settings(getattr(args, "config", None), overrides)
 
 
@@ -417,6 +431,28 @@ def _parse_rate_table(values: Sequence[str] | None) -> dict[int, float]:
             except ValueError as exc:
                 raise ConfigError(f"--rate {item!r} is not CLASS=RATE with numbers") from exc
     return rates
+
+
+def _parse_band_map(values: Sequence[str] | None) -> dict[str, int]:
+    """Parse ``--band-map red=3,nir=5`` (and repeated flags) into a mapping."""
+    if not values:
+        return {}
+    band_map: dict[str, int] = {}
+    for chunk in values:
+        for item in chunk.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" not in item:
+                raise ConfigError(f"--band-map expects BAND=POSITION, got {item!r}")
+            name, _, position = item.partition("=")
+            try:
+                band_map[name.strip().lower()] = int(position.strip())
+            except ValueError as exc:
+                raise ConfigError(
+                    f"--band-map {item!r} does not end in an integer position"
+                ) from exc
+    return band_map
 
 
 def _parse_prescription_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -686,6 +722,7 @@ def _handle_indices(args: argparse.Namespace) -> int:
         boundary,
         output_dir,
         prefix=settings.output.prefix,
+        band_map=settings.orthomosaic.band_map,
     )
     print(f"Wrote index rasters and summary to {output_dir}")
     print(indices.format_summary(rows))

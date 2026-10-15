@@ -69,6 +69,31 @@ orthophoto_resolution_cm = 5
 # commands find each other's outputs.
 prefix = "field"
 
+[orthomosaic]
+# Which band position holds what, 1-based. This is the one thing that makes the
+# analysis half sensor-agnostic: get the layout right and `indices`, `zones`,
+# `compare`, `sensitivity` and `prescribe` work with any multispectral export.
+#
+# The default below is the DJI M3M layout. Set a band to 0 if your sensor has no
+# such band. Only red, nir and rededge are required.
+#
+# MicaSense RedEdge-MX writes Blue, Green, Red, RedEdge, NIR with no alpha:
+#   blue = 1
+#   green = 2
+#   red = 3
+#   rededge = 4
+#   nir = 5
+#   alpha = 0
+#
+# If the export carries band descriptions, they are cross-checked against this
+# table and a contradiction is an error rather than a silently wrong index map.
+[orthomosaic.band_map]
+red = 1
+green = 2
+nir = 3
+rededge = 4
+alpha = 5
+
 [prescription]
 # ---------------------------------------------------------------------------
 # Everything in this table is an OPERATOR DECISION, not a model output.

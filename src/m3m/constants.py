@@ -60,3 +60,25 @@ RELATIVE_CLASS_NAMES: tuple[str, ...] = (
     "High",
     "Highest relative",
 )
+
+#: Band positions expected in a reflectance orthomosaic, 1-based.
+#:
+#: The default matches DJI M3M exports (Red, Green, NIR, RedEdge, Alpha). Other
+#: sensors differ -- MicaSense RedEdge-MX writes Blue, Green, Red, RedEdge, NIR
+#: with no alpha band -- so the layout is configurable under
+#: ``[orthomosaic] band_map``.
+ORTHOMOSAIC_BAND_KEYS: tuple[str, ...] = ("blue", "green", "red", "rededge", "nir", "alpha")
+
+#: Bands that must be present for the indices to be computable at all.
+REQUIRED_ORTHOMOSAIC_BANDS: tuple[str, ...] = ("red", "nir", "rededge")
+
+#: Value meaning "this sensor has no such band".
+BAND_ABSENT = 0
+
+DEFAULT_ORTHOMOSAIC_BAND_MAP: dict[str, int] = {
+    "red": 1,
+    "green": 2,
+    "nir": 3,
+    "rededge": 4,
+    "alpha": 5,
+}

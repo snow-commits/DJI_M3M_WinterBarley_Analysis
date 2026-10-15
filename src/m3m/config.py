@@ -1,4 +1,4 @@
-"""Configuration resolution for the M3M toolkit.
+﻿"""Configuration resolution for the M3M toolkit.
 
 Precedence, lowest to highest:
 
@@ -31,7 +31,11 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - exercised only on Python 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
-from m3m.constants import BANDS
+from m3m.constants import (
+    BANDS,
+    DEFAULT_ORTHOMOSAIC_BAND_MAP,
+    ORTHOMOSAIC_BAND_KEYS,
+)
 
 ENV_PREFIX = "M3M_"
 
@@ -64,6 +68,7 @@ DEFAULT_OUTPUT_PREFIX = "field"
 #: agronomic recommendation the toolkit has no basis for.
 DEFAULT_PRESCRIPTION_RATES: dict[int, float] = {1: 0.0, 2: 0.25, 3: 0.5, 4: 0.75, 5: 1.0}
 DEFAULT_PRESCRIPTION_UNIT = "relative"
+
 
 _PATH_FIELDS: tuple[str, ...] = (
     "img_dir",
@@ -199,6 +204,25 @@ class OutputSettings:
 
 
 @dataclass
+class OrthomosaicSettings:
+    """Where each spectral band sits in a reflectance orthomosaic.
+
+    The default matches DJI M3M exports (Red, Green, NIR, RedEdge, Alpha), but the
+    analysis half of the toolkit is sensor-agnostic as long as the band positions
+    are described correctly. MicaSense RedEdge-MX, for example, writes Blue,
+    Green, Red, RedEdge, NIR with no alpha band at all.
+    """
+
+    band_map: dict[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_ORTHOMOSAIC_BAND_MAP)
+    )
+
+    def position(self, band: str) -> int:
+        """1-based position of *band*, or 0 when it is marked absent."""
+        return int(self.band_map.get(band, 0))
+
+
+@dataclass
 class PrescriptionSettings:
     """Variable-rate application parameters.
 
@@ -229,6 +253,7 @@ class Settings:
     )
     output: OutputSettings = field(default_factory=OutputSettings)
     prescription: PrescriptionSettings = field(default_factory=PrescriptionSettings)
+    orthomosaic: OrthomosaicSettings = field(default_factory=OrthomosaicSettings)
     config_file: Path | None = None
     #: Which source supplied each key, for ``m3m config show``.
     sources: dict[str, str] = field(default_factory=dict)
@@ -255,6 +280,7 @@ class Settings:
                 "orthophoto_resolution_cm": self.orthorectification.orthophoto_resolution_cm,
             },
             "output": {"prefix": self.output.prefix},
+            "orthomosaic": {"band_map": dict(self.orthomosaic.band_map)},
             "prescription": {
                 "rate_by_class": {
                     str(code): rate
@@ -570,8 +596,54 @@ def load_settings(
         currency = str(rx_overrides["currency"])
     settings.prescription.currency = currency
 
+    # ---- orthomosaic band layout ----------------------------------------- #
+    raw_ortho_map = raw.get("orthomosaic", {})
+    if not isinstance(raw_ortho_map, dict):
+        raise ConfigError("[orthomosaic] must be a TOML table.")
+    band_map = dict(DEFAULT_ORTHOMOSAIC_BAND_MAP)
+    band_map_source = "default"
+    if "band_map" in raw_ortho_map:
+        band_map.update(
+            _coerce_band_map(raw_ortho_map["band_map"], where="[orthomosaic.band_map]")
+        )
+        band_map_source = "config file"
+    if "band_map" in overrides:
+        band_map.update(_coerce_band_map(overrides["band_map"], where="--band-map"))
+        band_map_source = "command line"
+    settings.orthomosaic.band_map = band_map
+    settings.sources["orthomosaic.band_map"] = band_map_source
+
     _validate_bands(settings)
     return settings
+
+
+def _coerce_band_map(value: Any, *, where: str) -> dict[str, int]:
+    """Validate a band-name -> 1-based position mapping."""
+    if not isinstance(value, dict):
+        raise ConfigError(f"{where} must map band names to positions.")
+    mapping: dict[str, int] = {}
+    for raw_key, raw_position in value.items():
+        key = str(raw_key).strip().lower()
+        if key not in ORTHOMOSAIC_BAND_KEYS:
+            raise ConfigError(
+                f"{where} names an unknown band {raw_key!r}. "
+                f"Valid bands: {', '.join(ORTHOMOSAIC_BAND_KEYS)}."
+            )
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"{where} position for {key!r} is not an integer: {raw_position!r}"
+            ) from exc
+        if position < 0:
+            raise ConfigError(
+                f"{where} position for {key!r} must be 0 (absent) or a 1-based band "
+                f"number, got {position}."
+            )
+        mapping[key] = position
+    if not mapping:
+        raise ConfigError(f"{where} must name at least one band.")
+    return mapping
 
 
 def _coerce_rate_table(value: Any, *, where: str) -> dict[int, float]:

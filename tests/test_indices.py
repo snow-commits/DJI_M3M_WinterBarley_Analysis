@@ -107,12 +107,12 @@ def test_band_description_mismatch_is_rejected(tmp_path: Path, orthomosaic) -> N
         data = src.read()
     with rasterio.open(wrong, "w", **profile) as dst:
         dst.write(data)
-        dst.set_band_description(1, "Green")  # should be Red
-    with pytest.raises(ValueError, match="should be 'Red'"):
+        dst.set_band_description(1, "Green")  # the default map says Red is here
+    with pytest.raises(ValueError, match="band map says 'Red' is there"):
         indices.calculate(wrong, orthomosaic.boundary, tmp_path / "out")
 
 
-def test_too_few_bands_is_rejected(tmp_path: Path, orthomosaic) -> None:
+def test_band_map_pointing_past_the_raster_is_rejected(tmp_path: Path, orthomosaic) -> None:
     small = tmp_path / "three_bands.tif"
     with rasterio.open(orthomosaic.raster) as src:
         profile = src.profile.copy()
@@ -120,8 +120,173 @@ def test_too_few_bands_is_rejected(tmp_path: Path, orthomosaic) -> None:
     profile.update(count=3)
     with rasterio.open(small, "w", **profile) as dst:
         dst.write(data)
-    with pytest.raises(ValueError, match="four reflectance bands plus an alpha band"):
+    with pytest.raises(ValueError, match="points past the end of the raster"):
         indices.calculate(small, orthomosaic.boundary, tmp_path / "out")
+
+
+# --------------------------------------------------------------------------- #
+# configurable band layout
+# --------------------------------------------------------------------------- #
+
+
+def _write_micasense_style(tmp_path: Path, orthomosaic) -> Path:
+    """Re-stack the fixture as Blue, Green, Red, RedEdge, NIR with no alpha."""
+    target = tmp_path / "micasense_order.tif"
+    with rasterio.open(orthomosaic.raster) as src:
+        profile = src.profile.copy()
+        red = src.read(1)
+        green = src.read(2)
+        nir = src.read(3)
+        rededge = src.read(4)
+    with rasterio.open(target, "w", **profile) as dst:
+        for position, (name, band) in enumerate(
+            (
+                ("Blue", (red * 0.6).astype("float32")),
+                ("Green", green),
+                ("Red", red),
+                ("RedEdge", rededge),
+                ("NIR", nir),
+            ),
+            start=1,
+        ):
+            dst.write(band, position)
+            dst.set_band_description(position, name)
+    return target
+
+
+MICASENSE_BAND_MAP = {"blue": 1, "green": 2, "red": 3, "rededge": 4, "nir": 5, "alpha": 0}
+
+
+def test_micasense_style_layout_is_supported(tmp_path: Path, orthomosaic) -> None:
+    """A different band order and no alpha band must work when described."""
+    raster = _write_micasense_style(tmp_path, orthomosaic)
+    output_dir = tmp_path / "out"
+    rows = indices.calculate(
+        raster, orthomosaic.boundary, output_dir, prefix="ms", band_map=MICASENSE_BAND_MAP
+    )
+
+    with rasterio.open(raster) as src:
+        red = src.read(3)
+        nir = src.read(5)
+    with rasterio.open(output_dir / "ms_ndvi.tif") as src:
+        ndvi = src.read(1)
+        tags = src.tags(1)
+
+    mask = ndvi != NODATA
+    assert mask.any()
+    assert np.allclose(ndvi[mask], ((nir - red) / (nir + red))[mask], atol=1e-5)
+    with rasterio.open(output_dir / "ms_ndre.tif") as src:
+        ndre = src.read(1)
+    with rasterio.open(raster) as src:
+        rededge = src.read(4)
+    assert np.allclose(
+        ndre[mask], ((nir - rededge) / (nir + rededge))[mask], atol=1e-5
+    )
+    assert np.allclose(
+        np.array([row["valid_pixels"] for row in rows]), rows[0]["valid_pixels"]
+    )
+    # The metadata must record the layout actually used, not the default one.
+    assert "Red=3" in tags["BAND_MAPPING"]
+    assert "NIR=5" in tags["BAND_MAPPING"]
+    assert "Alpha" not in tags["BAND_MAPPING"]
+    assert "no alpha band configured" in tags["MASK"]
+
+
+def test_default_map_and_explicit_default_agree(tmp_path: Path, orthomosaic) -> None:
+    """Passing the default map explicitly must change nothing."""
+    from m3m.constants import DEFAULT_ORTHOMOSAIC_BAND_MAP
+
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    indices.calculate(orthomosaic.raster, orthomosaic.boundary, first, prefix="d")
+    indices.calculate(
+        orthomosaic.raster,
+        orthomosaic.boundary,
+        second,
+        prefix="d",
+        band_map=DEFAULT_ORTHOMOSAIC_BAND_MAP,
+    )
+    assert (first / "d_ndvi.tif").read_bytes() == (second / "d_ndvi.tif").read_bytes()
+
+
+def test_wrong_band_map_is_caught_when_the_export_is_labelled(
+    tmp_path: Path, orthomosaic
+) -> None:
+    """The description cross-check is what stops a swapped map producing nonsense."""
+    with pytest.raises(ValueError, match="band map says 'NIR' is there"):
+        indices.calculate(
+            orthomosaic.raster,
+            orthomosaic.boundary,
+            tmp_path / "out",
+            band_map={"red": 3, "green": 2, "nir": 1, "rededge": 4, "alpha": 5},
+        )
+
+
+def test_wrong_band_map_is_undetectable_without_band_descriptions(
+    tmp_path: Path, orthomosaic
+) -> None:
+    """Documents a real limit: with no descriptions there is nothing to check against.
+
+    This is why the toolkit validates the layout against band descriptions and why
+    the README asks you to set them on export.
+    """
+    unlabelled = tmp_path / "unlabelled.tif"
+    with rasterio.open(orthomosaic.raster) as src:
+        profile = src.profile.copy()
+        data = src.read()
+    with rasterio.open(unlabelled, "w", **profile) as dst:
+        dst.write(data)  # descriptions deliberately not set
+
+    good = tmp_path / "good"
+    swapped = tmp_path / "swapped"
+    indices.calculate(unlabelled, orthomosaic.boundary, good, prefix="u")
+    indices.calculate(
+        unlabelled,
+        orthomosaic.boundary,
+        swapped,
+        prefix="u",
+        band_map={"red": 3, "green": 2, "nir": 1, "rededge": 4, "alpha": 5},
+    )
+    with rasterio.open(good / "u_ndvi.tif") as src:
+        a = src.read(1)
+    with rasterio.open(swapped / "u_ndvi.tif") as src:
+        b = src.read(1)
+    # Both "succeed", and they disagree. Swapping red and NIR negates NDVI
+    # exactly, so the wrong one is a plausible-looking map that only a human can
+    # spot - which is precisely why the toolkit asks for band descriptions.
+    mask = a != NODATA
+    assert mask.any()
+    assert np.allclose(a[mask], -b[mask], atol=1e-5)
+
+
+def test_duplicate_band_positions_are_rejected(tmp_path: Path, orthomosaic) -> None:
+    with pytest.raises(ValueError, match="both map to position"):
+        indices.calculate(
+            orthomosaic.raster,
+            orthomosaic.boundary,
+            tmp_path / "out",
+            band_map={"red": 1, "nir": 1, "rededge": 4},
+        )
+
+
+def test_missing_required_band_in_map_is_rejected(tmp_path: Path, orthomosaic) -> None:
+    with pytest.raises(ValueError, match="does not provide nir"):
+        indices.calculate(
+            orthomosaic.raster,
+            orthomosaic.boundary,
+            tmp_path / "out",
+            band_map={"red": 1, "nir": 0, "rededge": 4},
+        )
+
+
+def test_unknown_band_name_in_map_is_rejected(tmp_path: Path, orthomosaic) -> None:
+    with pytest.raises(ValueError, match="Unknown band name"):
+        indices.calculate(
+            orthomosaic.raster,
+            orthomosaic.boundary,
+            tmp_path / "out",
+            band_map={"red": 1, "nir": 3, "rededge": 4, "swir": 2},
+        )
 
 
 def test_unknown_index_name_is_rejected(tmp_path: Path, orthomosaic) -> None:

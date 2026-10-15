@@ -1,4 +1,4 @@
-"""Vegetation index rasters and memory-bounded statistics.
+﻿"""Vegetation index rasters and memory-bounded statistics.
 
 The whole orthomosaic is never loaded into memory: indices are computed window
 by window and summarised into fixed-range histograms, so quantile estimates cost
@@ -8,7 +8,7 @@ a constant amount of RAM regardless of image size.
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,21 +20,35 @@ from rasterio.enums import Resampling
 from rasterio.features import geometry_mask
 from shapely.geometry import mapping
 
-from m3m.constants import EPSILON, HISTOGRAM_BINS, INDEX_SPECS, NODATA
+from m3m.constants import (
+    DEFAULT_ORTHOMOSAIC_BAND_MAP,
+    EPSILON,
+    HISTOGRAM_BINS,
+    INDEX_SPECS,
+    NODATA,
+    ORTHOMOSAIC_BAND_KEYS,
+    REQUIRED_ORTHOMOSAIC_BANDS,
+)
 
-#: Band positions expected in a four-band reflectance orthomosaic plus alpha.
-ORTHOMOSAIC_BANDS: dict[int, str] = {1: "Red", 3: "NIR", 4: "RedEdge"}
-ALPHA_BAND = 5
+#: Human-readable names used in raster band descriptions.
+BAND_DESCRIPTIONS: dict[str, str] = {
+    "red": "Red",
+    "green": "Green",
+    "blue": "Blue",
+    "nir": "NIR",
+    "rededge": "RedEdge",
+    "alpha": "Alpha",
+}
 
 DEFAULT_INDEX_NAMES: tuple[str, ...] = tuple(INDEX_SPECS)
 
 __all__ = [
-    "ALPHA_BAND",
+    "BAND_DESCRIPTIONS",
     "DEFAULT_INDEX_NAMES",
-    "ORTHOMOSAIC_BANDS",
     "IndexStats",
     "calculate",
     "format_summary",
+    "resolve_band_positions",
     "validate_orthomosaic_bands",
 ]
 
@@ -92,19 +106,71 @@ class IndexStats:
         return float(low + (bin_index + 0.5) * width)
 
 
-def validate_orthomosaic_bands(dataset: rasterio.io.DatasetReader, path: Path | str) -> None:
-    """Check that band positions and descriptions match the expected layout."""
-    if dataset.count < ALPHA_BAND:
+def resolve_band_positions(
+    band_map: Mapping[str, int] | None, band_count: int, path: Path | str
+) -> dict[str, int]:
+    """Validate a band-name -> position map against the raster's band count.
+
+    Positions are 1-based; ``0`` marks a band the sensor does not have. Returns
+    only the bands that are actually present.
+    """
+    band_map = dict(band_map or DEFAULT_ORTHOMOSAIC_BAND_MAP)
+    unknown = {key for key in band_map if key not in ORTHOMOSAIC_BAND_KEYS}
+    if unknown:
         raise ValueError(
-            f"Expected four reflectance bands plus an alpha band, got {dataset.count}: {path}"
+            f"Unknown band name(s) {sorted(unknown)} in the band map. "
+            f"Valid names: {', '.join(ORTHOMOSAIC_BAND_KEYS)}."
         )
-    descriptions = dataset.descriptions
-    for band, expected in ORTHOMOSAIC_BANDS.items():
-        actual = (descriptions[band - 1] or "").lower()
-        if actual != expected.lower():
+    positions = {
+        key: int(position) for key, position in band_map.items() if int(position) > 0
+    }
+
+    missing = [key for key in REQUIRED_ORTHOMOSAIC_BANDS if key not in positions]
+    if missing:
+        raise ValueError(
+            f"The band map does not provide {', '.join(missing)}, which the indices "
+            f"require. Configure [orthomosaic] band_map for this sensor."
+        )
+    out_of_range = {key: pos for key, pos in positions.items() if pos > band_count}
+    if out_of_range:
+        raise ValueError(
+            f"The band map points past the end of the raster ({band_count} bands): "
+            f"{out_of_range}. Check [orthomosaic] band_map."
+        )
+    seen: dict[int, str] = {}
+    for key, position in sorted(positions.items()):
+        if position in seen:
             raise ValueError(
-                f"Band {band} of {path} should be {expected!r} but its description is "
-                f"{actual!r}. Re-export the orthomosaic with band descriptions set."
+                f"Bands {seen[position]!r} and {key!r} both map to position {position}."
+            )
+        seen[position] = key
+    return positions
+
+
+def validate_orthomosaic_bands(
+    dataset: rasterio.io.DatasetReader,
+    path: Path | str,
+    positions: Mapping[str, int],
+) -> None:
+    """Cross-check the band map against the raster's own band descriptions.
+
+    A wrong band map produces indices that look plausible but are nonsense, so
+    when the export carries descriptions they are treated as authoritative. An
+    export without descriptions is allowed through with no check.
+    """
+    descriptions = dataset.descriptions
+    if not any(descriptions):
+        return
+    for key, position in sorted(positions.items()):
+        expected = BAND_DESCRIPTIONS.get(key)
+        actual = (descriptions[position - 1] or "").strip()
+        if not actual or expected is None:
+            continue
+        if actual.lower() != expected.lower():
+            raise ValueError(
+                f"Band {position} of {path} is described as {actual!r}, but the band map "
+                f"says {expected!r} is there. Fix [orthomosaic] band_map, or re-export "
+                f"the orthomosaic with correct band descriptions."
             )
 
 
@@ -116,12 +182,14 @@ def calculate(
     prefix: str = "field",
     index_names: Sequence[str] = DEFAULT_INDEX_NAMES,
     bins: int = HISTOGRAM_BINS,
+    band_map: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Write one float32 raster per index plus a summary CSV.
 
     The mask is ``inside boundary AND alpha > 0 AND every required band finite
-    and within [0, 1]``. Using the same mask for every index keeps the summary
-    statistics directly comparable.
+    and within [0, 1]``; the alpha clause is dropped for sensors that have no
+    alpha band. Using the same mask for every index keeps the summary statistics
+    directly comparable.
     """
     raster_path = Path(raster_path)
     boundary_path = Path(boundary_path)
@@ -136,7 +204,22 @@ def calculate(
         )
 
     with rasterio.open(raster_path) as src:
-        validate_orthomosaic_bands(src, raster_path)
+        positions = resolve_band_positions(band_map, src.count, raster_path)
+        validate_orthomosaic_bands(src, raster_path, positions)
+        # Deterministic read order; alpha is optional so it is handled separately.
+        spectral = ("red", "nir", "rededge")
+        band_mapping = ", ".join(
+            f"{BAND_DESCRIPTIONS[key]}={positions[key]}"
+            for key in ORTHOMOSAIC_BAND_KEYS
+            if key in positions
+        )
+        mask_description = (
+            "inside boundary AND alpha > 0 AND required input reflectance bands "
+            "finite and within [0, 1]"
+            if "alpha" in positions
+            else "inside boundary AND required input reflectance bands finite and "
+            "within [0, 1] (no alpha band configured)"
+        )
 
         boundary = gpd.read_file(boundary_path)
         if boundary.empty or boundary.geometry.is_empty.all():
@@ -171,11 +254,8 @@ def calculate(
                 INDEX_NAME=name,
                 FORMULA=INDEX_SPECS[name]["formula"],
                 INPUT_RASTER=str(raster_path),
-                BAND_MAPPING="Red=1, NIR=3, RedEdge=4, Alpha=5",
-                MASK=(
-                    "inside boundary AND alpha > 0 AND required input reflectance "
-                    "bands finite and within [0, 1]"
-                ),
+                BAND_MAPPING=band_mapping,
+                MASK=mask_description,
                 EVI2_REFLECTANCE_SCALE="Input reflectance is unitless, scaled 0-1",
             )
             destinations[name] = dst
@@ -190,8 +270,12 @@ def calculate(
         }
         try:
             for _, window in src.block_windows(1):
-                data = src.read((1, 3, 4, ALPHA_BAND), window=window)
-                red, nir, rededge, alpha = data
+                read_order = spectral + (("alpha",) if "alpha" in positions else ())
+                data = src.read(tuple(positions[key] for key in read_order), window=window)
+                values = dict(zip(read_order, data, strict=True))
+                red = values["red"]
+                nir = values["nir"]
+                rededge = values["rededge"]
                 inside = geometry_mask(
                     geometries,
                     out_shape=(int(window.height), int(window.width)),
@@ -200,7 +284,6 @@ def calculate(
                 )
                 valid = (
                     inside
-                    & (alpha > 0)
                     & np.isfinite(red)
                     & np.isfinite(nir)
                     & np.isfinite(rededge)
@@ -211,6 +294,8 @@ def calculate(
                     & (rededge >= 0)
                     & (rededge <= 1)
                 )
+                if "alpha" in values:
+                    valid &= values["alpha"] > 0
                 ndvi_denominator = nir + red
                 ndre_denominator = nir + rededge
                 evi2_denominator = nir + 2.4 * red + 1.0
