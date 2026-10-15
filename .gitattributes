@@ -1,0 +1,13 @@
+# Normalise line endings so a Windows checkout and a Linux CI run see the same
+# bytes. Without this, git rewrites entire files whenever the line-ending
+# setting changes, which buries real changes in noise.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending translated.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.tif  binary
+*.tiff binary
+*.gpkg binary
+*.zip  binary
