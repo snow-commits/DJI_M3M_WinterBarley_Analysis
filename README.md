@@ -9,9 +9,10 @@ radiometric calibration, orthomosaic quality assessment, vegetation indices,
 within-field relative zones, and a sensitivity analysis of the zoning itself.
 
 Everything here is `pip install`-able, needs **no external binaries** (no
-ExifTool, no GDAL CLI, no Docker) for the core pipeline, and never loads a whole
-orthomosaic into memory — indices and quantiles are computed window by window
-into fixed-range histograms.
+ExifTool, no GDAL CLI, no Docker) for the core pipeline, and processes rasters
+window by window instead of materialising them — see
+[Memory behaviour](#memory-behaviour) for measured numbers and the one knob that
+matters.
 
 > **What this is not.** Nothing in this toolkit predicts biomass or yield, and
 > nothing here has been validated against field-measured ground truth. The
@@ -177,6 +178,33 @@ outputs/
 └─ orthorectify.sh                    rendered, review before running
 ```
 
+## Memory behaviour
+
+Rasters are read and written one window at a time, and the accumulation stages
+are exactly constant-memory. Measured on a 4000x3000 (12 megapixel) reflectance
+orthomosaic — 48x the raster the test suite uses — by stage:
+
+| stage | GDAL default cache | `GDAL_CACHEMAX=64` |
+| --- | --- | --- |
+| `zones.run` (thresholds + classification) | +0.0 MB | +0.0 MB |
+| `indices.calculate` | +444.9 MB | +115.2 MB |
+| peak working set | ~563 MB | ~234 MB |
+| wall time | — | 12.4 s |
+
+The growth is **GDAL's block cache, not the toolkit**. The accumulation and
+classification stages are constant-memory either way, but GDAL's cache defaults
+to about 5% of system RAM, which is hundreds of megabytes on a large machine and
+makes the peak look as though it scaled with image size.
+
+**The `m3m` CLI caps that cache at 64 MB** unless you set `GDAL_CACHEMAX`
+yourself. It is the knee of the curve: peak drops 563 MB → 234 MB for no
+measurable slowdown (12.4 s versus 12.5 s), while 32 MB costs 15 s. If you call
+the library directly rather than through the CLI, set `GDAL_CACHEMAX` in your own
+process — importing `m3m` deliberately does not touch global GDAL state.
+
+The ~234 MB peak includes roughly 100 MB of `rasterio`/`geopandas`/`matplotlib`
+import overhead, paid once and independent of raster size.
+
 ## Methodology and limitations
 
 These are the constraints on what the outputs mean. They are stated here rather
@@ -338,6 +366,23 @@ m3m zones
   面积是按像元数 × 名义像元面积算的，**不含地头、重叠和机具转弯损失**。
 - **几何精度未验证**：缺少独立测量的地面控制点。
 - M3M **没有独立蓝波段**，因此无法计算标准三波段 EVI，本工具用 EVI2 替代。
+
+### 内存行为
+
+栅格按窗口逐块读写，累加与分类阶段是**严格的常数内存**。在 4000×3000（1200 万像元，
+是测试用栅格的 48 倍）上实测：
+
+| 阶段 | GDAL 默认缓存 | `GDAL_CACHEMAX=64` |
+|---|---|---|
+| `zones.run`（阈值 + 分类） | +0.0 MB | +0.0 MB |
+| `indices.calculate` | +444.9 MB | +115.2 MB |
+| 峰值工作集 | ~563 MB | ~234 MB |
+
+增长来自 **GDAL 的块缓存，不是本工具**：默认约取系统内存的 5%，在大机器上就是几百 MB，
+会让峰值看起来像随影像尺寸增长。**`m3m` 命令默认把缓存压到 64 MB**（除非你自己设了
+`GDAL_CACHEMAX`）——这是曲线的拐点：峰值 563→234 MB 而耗时不变（12.4 s vs 12.5 s），
+压到 32 MB 则要 15 s。直接调用库（不走 CLI）时请在你自己进程里设 `GDAL_CACHEMAX`，
+因为 import `m3m` 刻意不改动 GDAL 的全局状态。
 
 ### 与旧脚本的对应关系
 
