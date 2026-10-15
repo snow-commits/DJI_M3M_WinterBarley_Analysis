@@ -47,6 +47,9 @@ m3m indices     --config demo/m3m.toml --raster demo/synthetic_reflectance_ortho
 m3m zones       --config demo/m3m.toml
 m3m compare     --config demo/m3m.toml
 m3m sensitivity --config demo/m3m.toml
+m3m prescribe   --config demo/m3m.toml \
+  --rate 1=0,2=40,3=80,4=120,5=160 --unit "kg N/ha" \
+  --target-mean-rate 100 --product-price 4.5 --application-cost-per-ha 25
 ```
 
 The generated captures are written as the exact inverse of the DJI signal
@@ -88,6 +91,7 @@ geometry and cannot be guessed; the command tells you exactly which
 | `m3m zones` | Within-field relative quintiles, area table, maps |
 | `m3m compare` | Index pairwise agreement, or a repaired orthomosaic against the original |
 | `m3m sensitivity` | How much the zoning depends on the chosen index weights |
+| `m3m prescribe` | Turn the zones into a variable-rate map with areas, product quantities and costs |
 | `m3m synthetic` | Generate a synthetic dataset |
 
 Run `m3m <command> --help` for the full flag list.
@@ -164,6 +168,11 @@ outputs/
 │  ├─ vegetation_index_relative_classes.csv
 │  └─ *.png
 ├─ sensitivity/                       m3m sensitivity
+├─ prescription/                      m3m prescribe
+│  ├─ field_ndvi_prescription.tif     float32 application rate
+│  ├─ field_ndvi_prescription_summary.csv   per-zone rate, area, quantity, cost
+│  ├─ field_ndvi_prescription_totals.json   totals + limitations, machine-readable
+│  └─ field_ndvi_prescription.png     rate map + per-zone quantity chart
 ├─ orthomosaic/                       m3m orthorectify, assess, compare
 └─ orthorectify.sh                    rendered, review before running
 ```
@@ -201,18 +210,30 @@ than buried, because most of them cannot be checked from the imagery alone.
    greener than 80% of *this* field *today* — not "high yield" and not a
    fertiliser prescription.
 
-6. **`m3m sensitivity` measures weight sensitivity, not accuracy.** It re-weights
+6. **The prescription rate schedule is an operator input, not a model output.**
+   `m3m prescribe` applies a schedule you supply and reports the resulting areas,
+   product quantities and costs. It does not derive, optimise or validate those
+   rates, because it has no ground truth to do so with. Two further consequences
+   are easy to miss: because the zones are equal-frequency, each class always
+   covers roughly a fifth of the field, so a relative-mode prescription can
+   redistribute product within a field-level decision but can never conclude that
+   a field needs less overall — use `target_mean_rate` (or absolute rates) to
+   keep the total under operator control. And computed areas are pixel counts
+   times the nominal pixel area, so they exclude headland, overlap and implement
+   turning losses.
+
+7. **`m3m sensitivity` measures weight sensitivity, not accuracy.** It re-weights
    the same index ranks and reports how similar the resulting maps are. Two
    candidate scores agreeing does not make either closer to biomass: with no
    ground truth in the comparison there is nothing for the agreement to be
    measured against. It is a self-referential robustness check, and the module
    docstring says so.
 
-7. **Geometric accuracy is not verified.** Orthorectification quality checks
+8. **Geometric accuracy is not verified.** Orthorectification quality checks
    compare grids and coverage; they are not an independent assessment of
    absolute positional error, which needs surveyed ground control points.
 
-8. **Temporal and environmental coverage is narrow.** Results describe the
+9. **Temporal and environmental coverage is narrow.** Results describe the
    captured dates only and do not carry over to the whole growing season.
 
 ### What would lift these limits
@@ -281,6 +302,8 @@ m3m synthetic --dest demo                    # 生成一套合成数据集
 m3m calibrate  --config demo/m3m.toml        # 辐射校正
 m3m indices    --config demo/m3m.toml --raster demo/synthetic_reflectance_orthomosaic.tif
 m3m zones      --config demo/m3m.toml
+m3m prescribe  --config demo/m3m.toml --rate 1=0,2=40,3=80,4=120,5=160 \
+               --unit "kg N/ha" --target-mean-rate 100 --product-price 4.5
 ```
 
 合成影像是按 DJI 信号模型的**精确逆运算**生成的，所以校正结果必须还原出生成时设定的反射率——
@@ -308,6 +331,11 @@ m3m zones
   输出的分区是"同一田块、同一日期内的相对等级"，**不是农学阈值，也不是施肥处方**。
 - **`m3m sensitivity` 测的是权重敏感性，不是精度**：它把同一份指数秩重新加权后比较结果相似度，
   没有真值参与，所以不能解读为"某个方案更接近生物量"。
+- **`m3m prescribe` 的施肥/施药量是你给的，不是模型算的**：工具负责把这份方案一致地落到每个分区，
+  并算出各自面积、用量和成本；它没有能力推导或验证这些数值。另外两个容易踩的点：分区是等频的，
+  每级恒定约占田块 1/5，所以相对模式下的处方只能在"总量已定的前提下重新分配"，**永远得不出
+  "这块田整体要少施"的结论**（要么用 `--target-mean-rate` 锁住总量，要么直接用绝对用量）；
+  面积是按像元数 × 名义像元面积算的，**不含地头、重叠和机具转弯损失**。
 - **几何精度未验证**：缺少独立测量的地面控制点。
 - M3M **没有独立蓝波段**，因此无法计算标准三波段 EVI，本工具用 EVI2 替代。
 
